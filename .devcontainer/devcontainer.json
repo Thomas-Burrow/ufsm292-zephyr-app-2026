@@ -1,0 +1,20 @@
+{
+  "image": "ghcr.io/zephyrproject-rtos/ci:latest",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/ufsm292/app,type=bind",
+  "workspaceFolder": "/ufsm292",
+  "onCreateCommand": "bash -i /ufsm292/app/.devcontainer/onCreateCommand.sh",
+  "remoteEnv": { "LC_ALL": "C" },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "cmake.configureOnOpen": false
+      },
+      "extensions": [
+        "ms-vscode.cpptools-extension-pack",
+        "nordic-semiconductor.nrf-devicetree",
+        "nordic-semiconductor.nrf-kconfig"
+      ]
+    }
+  },
+  "remoteUser": "zephyr"
+}
