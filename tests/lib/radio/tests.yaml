@@ -1,0 +1,12 @@
+common:
+  tags:
+    - radio
+    - sensor_frame
+  type: unit
+
+tests:
+  lib.radio.sensor_frame:
+    # The unittest component defaults to -m32; the host here has no 32-bit
+    # libgcc. Build the host binary 64-bit instead.
+    extra_args:
+      - M64_MODE=1
