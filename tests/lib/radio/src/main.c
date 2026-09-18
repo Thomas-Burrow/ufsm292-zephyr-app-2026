@@ -257,4 +257,314 @@ ZTEST(sensor_frame, test_decode_rejects_malformed)
 		      "reserved address mode accepted");
 }
 
+/* --- Characterization: is the data moved without mangling? -------------- */
+
+/*
+ * Field isolation. Starting from an all-zero reading, setting exactly one
+ * field to all-ones must change exactly that field's bytes in the frame and
+ * leave every other byte untouched. This pins each field to its offset and
+ * width, and catches off-by-one/aliasing bugs that a single golden vector
+ * cannot see.
+ */
+static void assert_payload_field_writes_only(size_t off, size_t len,
+					     const struct sensor_reading *r)
+{
+	const struct sensor_frame_cfg cfg = { 0 };
+	const struct sensor_reading zero = { 0 };
+	uint8_t base[SENSOR_FRAME_LEN];
+	uint8_t got[SENSOR_FRAME_LEN];
+	size_t i;
+
+	zassert_equal(sensor_frame_encode(base, sizeof(base), &cfg, &zero),
+		      SENSOR_FRAME_LEN, "baseline encode failed");
+	zassert_equal(sensor_frame_encode(got, sizeof(got), &cfg, r),
+		      SENSOR_FRAME_LEN, "field encode failed");
+
+	for (i = 0; i < SENSOR_FRAME_LEN; i++) {
+		bool in_field = (i >= off) && (i < off + len);
+		uint8_t want = in_field ? 0xFF : base[i];
+
+		zassert_equal(got[i], want,
+			      "byte %zu wrong for field at [%zu,%zu)",
+			      i, off, off + len);
+	}
+}
+
+ZTEST(sensor_frame, test_encode_payload_field_isolation)
+{
+	struct sensor_reading r;
+
+	r = (struct sensor_reading){ .node_id = 0xFF };
+	assert_payload_field_writes_only(9, 1, &r);
+
+	r = (struct sensor_reading){ .seq = 0xFFFF };
+	assert_payload_field_writes_only(10, 2, &r);
+
+	r = (struct sensor_reading){ .light = 0xFFFF };
+	assert_payload_field_writes_only(12, 2, &r);
+
+	r = (struct sensor_reading){ .temp_c_x100 = -1 };
+	assert_payload_field_writes_only(14, 2, &r);
+
+	r = (struct sensor_reading){ .accel = { -1, 0, 0 } };
+	assert_payload_field_writes_only(16, 2, &r);
+
+	r = (struct sensor_reading){ .accel = { 0, -1, 0 } };
+	assert_payload_field_writes_only(18, 2, &r);
+
+	r = (struct sensor_reading){ .accel = { 0, 0, -1 } };
+	assert_payload_field_writes_only(20, 2, &r);
+
+	r = (struct sensor_reading){ .uptime_ms = 0xFFFFFFFFU };
+	assert_payload_field_writes_only(22, 4, &r);
+
+	r = (struct sensor_reading){ .flags = 0xFF };
+	assert_payload_field_writes_only(26, 1, &r);
+}
+
+/* Same idea for the MAC header fields taken from struct sensor_frame_cfg. */
+static void assert_header_field_writes_only(size_t off, size_t len,
+					    const struct sensor_frame_cfg *cfg)
+{
+	const struct sensor_frame_cfg zero = { 0 };
+	const struct sensor_reading reading = { 0 };
+	uint8_t base[SENSOR_FRAME_LEN];
+	uint8_t got[SENSOR_FRAME_LEN];
+	size_t i;
+
+	zassert_equal(sensor_frame_encode(base, sizeof(base), &zero, &reading),
+		      SENSOR_FRAME_LEN, "baseline encode failed");
+	zassert_equal(sensor_frame_encode(got, sizeof(got), cfg, &reading),
+		      SENSOR_FRAME_LEN, "header encode failed");
+
+	for (i = 0; i < SENSOR_FRAME_LEN; i++) {
+		bool in_field = (i >= off) && (i < off + len);
+		uint8_t want = in_field ? 0xFF : base[i];
+
+		zassert_equal(got[i], want,
+			      "header byte %zu wrong for field at [%zu,%zu)",
+			      i, off, off + len);
+	}
+}
+
+ZTEST(sensor_frame, test_encode_header_field_isolation)
+{
+	struct sensor_frame_cfg cfg;
+
+	cfg = (struct sensor_frame_cfg){ .mac_seq = 0xFF };
+	assert_header_field_writes_only(2, 1, &cfg);
+
+	cfg = (struct sensor_frame_cfg){ .pan_id = 0xFFFF };
+	assert_header_field_writes_only(3, 2, &cfg);
+
+	cfg = (struct sensor_frame_cfg){ .dst_short_addr = 0xFFFF };
+	assert_header_field_writes_only(5, 2, &cfg);
+
+	cfg = (struct sensor_frame_cfg){ .src_short_addr = 0xFFFF };
+	assert_header_field_writes_only(7, 2, &cfg);
+}
+
+/*
+ * The encoder must fill exactly SENSOR_FRAME_LEN bytes and never write past
+ * it, even when it is handed a larger buffer.
+ */
+ZTEST(sensor_frame, test_encode_writes_exactly_frame_length)
+{
+	uint8_t buf[SENSOR_FRAME_LEN + 8];
+	size_t i;
+
+	memset(buf, 0xAA, sizeof(buf));
+
+	zassert_equal(sensor_frame_encode(buf, sizeof(buf), &golden_cfg,
+					  &golden_reading),
+		      SENSOR_FRAME_LEN, "wrong byte count");
+	zassert_mem_equal(buf, golden_frame, SENSOR_FRAME_LEN,
+			  "frame bytes diverged");
+
+	for (i = SENSOR_FRAME_LEN; i < sizeof(buf); i++) {
+		zassert_equal(buf[i], 0xAA,
+			      "encoder wrote past the frame at byte %zu", i);
+	}
+}
+
+/* Signed payload fields must survive the full two's-complement range. */
+ZTEST(sensor_frame, test_roundtrip_signed_boundaries)
+{
+	static const int16_t vals[] = {
+		INT16_MIN, INT16_MIN + 1, -1234, -1, 0, 1, 1234,
+		INT16_MAX - 1, INT16_MAX
+	};
+	const size_t n = sizeof(vals) / sizeof(vals[0]);
+	uint8_t buf[SENSOR_FRAME_LEN];
+	struct sensor_reading r = { 0 };
+	struct sensor_reading out;
+	size_t i;
+
+	for (i = 0; i < n; i++) {
+		r.temp_c_x100 = vals[i];
+		zassert_equal(sensor_frame_encode(buf, sizeof(buf), &golden_cfg,
+						  &r),
+			      SENSOR_FRAME_LEN, "encode temp=%d failed", vals[i]);
+		zassert_ok(sensor_frame_decode(buf, sizeof(buf), &out),
+			   "decode temp=%d failed", vals[i]);
+		zassert_equal(out.temp_c_x100, vals[i],
+			      "temp mangled: %d -> %d",
+			      (int)vals[i], (int)out.temp_c_x100);
+
+		r.temp_c_x100 = 0;
+		r.accel[0] = vals[i];
+		r.accel[1] = vals[i];
+		r.accel[2] = vals[i];
+		zassert_equal(sensor_frame_encode(buf, sizeof(buf), &golden_cfg,
+						  &r),
+			      SENSOR_FRAME_LEN, "encode accel=%d failed", vals[i]);
+		zassert_ok(sensor_frame_decode(buf, sizeof(buf), &out),
+			   "decode accel=%d failed", vals[i]);
+		zassert_equal(out.accel[0], vals[i],
+			      "accel[0] mangled: %d", (int)vals[i]);
+		zassert_equal(out.accel[1], vals[i],
+			      "accel[1] mangled: %d", (int)vals[i]);
+		zassert_equal(out.accel[2], vals[i],
+			      "accel[2] mangled: %d", (int)vals[i]);
+
+		r.accel[0] = 0;
+		r.accel[1] = 0;
+		r.accel[2] = 0;
+	}
+}
+
+/* Deterministic xorshift32 so any failure reproduces exactly. */
+static uint32_t rng_state;
+
+static uint32_t rng_next(void)
+{
+	uint32_t x = rng_state;
+
+	x ^= x << 13;
+	x ^= x >> 17;
+	x ^= x << 5;
+	rng_state = x;
+	return x;
+}
+
+/*
+ * Property test: for a large batch of pseudo-random readings and MAC
+ * parameters, encode -> decode must return every field bit-for-bit, and
+ * re-encoding the decoded value must reproduce the exact same frame. This is
+ * the broadest "no mangling" characterization available on the host.
+ */
+ZTEST(sensor_frame, test_roundtrip_random_values)
+{
+	uint8_t frame[SENSOR_FRAME_LEN];
+	uint8_t reencoded[SENSOR_FRAME_LEN];
+	struct sensor_frame_cfg cfg;
+	struct sensor_reading r;
+	struct sensor_reading out;
+	int iter;
+
+	rng_state = 0x9E3779B9U;
+
+	for (iter = 0; iter < 2000; iter++) {
+		cfg.pan_id = (uint16_t)rng_next();
+		cfg.dst_short_addr = (uint16_t)rng_next();
+		cfg.src_short_addr = (uint16_t)rng_next();
+		cfg.mac_seq = (uint8_t)rng_next();
+		cfg.ack_request = (rng_next() & 1U) != 0U;
+
+		r.node_id = (uint8_t)rng_next();
+		r.seq = (uint16_t)rng_next();
+		r.light = (uint16_t)rng_next();
+		r.temp_c_x100 = (int16_t)(uint16_t)rng_next();
+		r.accel[0] = (int16_t)(uint16_t)rng_next();
+		r.accel[1] = (int16_t)(uint16_t)rng_next();
+		r.accel[2] = (int16_t)(uint16_t)rng_next();
+		r.uptime_ms = rng_next();
+		r.flags = (uint8_t)rng_next();
+
+		zassert_equal(sensor_frame_encode(frame, sizeof(frame), &cfg, &r),
+			      SENSOR_FRAME_LEN, "encode failed at iter %d", iter);
+		zassert_ok(sensor_frame_decode(frame, sizeof(frame), &out),
+			   "decode failed at iter %d", iter);
+		assert_reading_eq(&out, &r);
+
+		zassert_equal(sensor_frame_encode(reencoded, sizeof(reencoded),
+						  &cfg, &out),
+			      SENSOR_FRAME_LEN, "re-encode failed at iter %d", iter);
+		zassert_mem_equal(reencoded, frame, sizeof(frame),
+				  "re-encode diverged at iter %d", iter);
+	}
+}
+
+/* decode() takes a const pointer; make sure it really does not write. */
+ZTEST(sensor_frame, test_decode_does_not_modify_input)
+{
+	uint8_t frame[SENSOR_FRAME_LEN];
+	uint8_t snapshot[SENSOR_FRAME_LEN];
+	struct sensor_reading out;
+
+	memcpy(frame, golden_frame, sizeof(frame));
+	memcpy(snapshot, frame, sizeof(snapshot));
+
+	zassert_ok(sensor_frame_decode(frame, sizeof(frame), &out),
+		   "decode failed");
+	zassert_mem_equal(frame, snapshot, sizeof(frame),
+			  "decoder modified its input buffer");
+}
+
+/*
+ * Decoder-side field isolation. Build raw frames (known header + all-zero
+ * payload) with exactly one payload field set to all-ones, and check that the
+ * decoder fills exactly the matching struct field and leaves the rest zero.
+ * This characterizes decode on its own, without trusting the encoder.
+ */
+static void assert_payload_field_decodes_only(size_t off, size_t len,
+					      const struct sensor_reading *expected)
+{
+	uint8_t frame[SENSOR_FRAME_LEN];
+	struct sensor_reading out;
+	size_t i;
+
+	memcpy(frame, golden_frame, SENSOR_FRAME_HEADER_LEN);
+	memset(&frame[SENSOR_FRAME_HEADER_LEN], 0, SENSOR_PAYLOAD_LEN);
+	for (i = 0; i < len; i++) {
+		frame[off + i] = 0xFF;
+	}
+
+	zassert_ok(sensor_frame_decode(frame, sizeof(frame), &out),
+		   "decode failed for field [%zu,%zu)", off, off + len);
+	assert_reading_eq(&out, expected);
+}
+
+ZTEST(sensor_frame, test_decode_payload_field_isolation)
+{
+	struct sensor_reading r;
+
+	r = (struct sensor_reading){ .node_id = 0xFF };
+	assert_payload_field_decodes_only(9, 1, &r);
+
+	r = (struct sensor_reading){ .seq = 0xFFFF };
+	assert_payload_field_decodes_only(10, 2, &r);
+
+	r = (struct sensor_reading){ .light = 0xFFFF };
+	assert_payload_field_decodes_only(12, 2, &r);
+
+	r = (struct sensor_reading){ .temp_c_x100 = -1 };
+	assert_payload_field_decodes_only(14, 2, &r);
+
+	r = (struct sensor_reading){ .accel = { -1, 0, 0 } };
+	assert_payload_field_decodes_only(16, 2, &r);
+
+	r = (struct sensor_reading){ .accel = { 0, -1, 0 } };
+	assert_payload_field_decodes_only(18, 2, &r);
+
+	r = (struct sensor_reading){ .accel = { 0, 0, -1 } };
+	assert_payload_field_decodes_only(20, 2, &r);
+
+	r = (struct sensor_reading){ .uptime_ms = 0xFFFFFFFFU };
+	assert_payload_field_decodes_only(22, 4, &r);
+
+	r = (struct sensor_reading){ .flags = 0xFF };
+	assert_payload_field_decodes_only(26, 1, &r);
+}
+
 ZTEST_SUITE(sensor_frame, NULL, NULL, NULL, NULL, NULL);
