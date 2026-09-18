@@ -10,6 +10,9 @@
 /build*
 /twister-out*
 
+# local reference datasheets (not tracked)
+datasheets/
+
 __pycache__/
 
 # docs
