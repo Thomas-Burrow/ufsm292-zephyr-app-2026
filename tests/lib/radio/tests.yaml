@@ -2,6 +2,7 @@ common:
   tags:
     - radio
     - sensor_frame
+    - unit
   type: unit
 
 tests:

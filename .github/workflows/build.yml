@@ -52,4 +52,15 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then
             EXTRA_TWISTER_FLAGS="--short-build-path -O/tmp/twister-out"
           fi
-          west twister -T tests -v --inline-logs --integration $EXTRA_TWISTER_FLAGS
+          # type: unit tests run on the host and are Linux-only (see
+          # doc/develop/test/ztest.rst); they run in the Linux-only step below.
+          west twister -T tests -v --inline-logs --integration --exclude-tag unit $EXTRA_TWISTER_FLAGS
+
+      - name: Unit tests
+        # The unit_testing board builds a host binary; Zephyr supports it on
+        # Linux only, so keep it out of the macOS/Windows matrix legs.
+        if: runner.os == 'Linux'
+        working-directory: example-application
+        shell: bash
+        run: |
+          west twister -T tests -v --inline-logs --tag unit
