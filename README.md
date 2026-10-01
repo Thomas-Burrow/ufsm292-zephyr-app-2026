@@ -103,6 +103,10 @@ To build the gateway application for the SAM R21 Xplained Pro board:
 west build -b samr21_xpro gateway
 ```
 
+Ethernet1 Xplained Pro / KSZ8851SNL integration is currently at the planning
+stage; see [the Ethernet HAL plan](doc/ethernet-hal.rst) for wiring, software
+boundaries, hardware-free validation, and required additional documentation.
+
 ### Testing
 
 To execute Twister integration tests, run the following command:
