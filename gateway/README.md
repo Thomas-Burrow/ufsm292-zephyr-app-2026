@@ -60,3 +60,21 @@ on the same fd. A separate synthetic fragmented RX case bypasses IEEE802154 L2
 Validated against Zephyr 4.4.99, commit `c605ea46e15f`. The SAM R21 image builds,
 but radio startup, promiscuous reception, FCS removal and actual TX/RX still need
 hardware validation. Ethernet/IP operation is not validated by these tests.
+
+## Application threads
+
+`gateway_id` configures the radio/socket and logs statistics every five seconds.
+It starts automatically with a 1024-byte stack at priority 0. `radio_rx_id`
+uses a 2048-byte stack at priority 5 and waits on `rx_ready` until setup succeeds.
+`main()` returns immediately, leaving room to start other services such as an
+HTTP server. The main stack remains available for Zephyr initialization; the
+dedicated gateway thread adds its own stack and thread bookkeeping.
+
+The RX loop shows the application flow: receive a complete frame, decode a
+`sensor_reading`, then call `handle_sensor_reading()`. That handler currently
+prints the reading and is the place to add application processing. It runs
+synchronously in the RX thread: keep work bounded so reception can continue.
+The reading belongs to the loop's stack and is reused on the next decode; copy
+it into a message queue or mutex-protected shared state for an HTTP server or
+other thread rather than retaining its pointer. HTTP service setup and shared
+reading storage are not implemented by this example.
