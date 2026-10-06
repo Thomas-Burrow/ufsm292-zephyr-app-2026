@@ -70,9 +70,10 @@ uses a 2048-byte stack at priority 5 and waits on `rx_ready` until setup succeed
 HTTP server. The main stack remains available for Zephyr initialization; the
 dedicated gateway thread adds its own stack and thread bookkeeping.
 
-`eth_monitor_id` watches the ENC28J60 Ethernet link: carrier on/off and IPv4
-address events via net-mgmt, plus a 10 s carrier/admin status log. 1024-byte
-stack at priority 7; exits idle if no Ethernet interface exists.
+Ethernet setup (`eth_setup()`) runs inline in the gateway thread: DHCP start
+plus a net-mgmt callback for carrier on/off and IPv4 address events. The
+5 s stats loop also logs carrier/admin status every other tick (10 s) when
+an Ethernet interface exists; carrier/IP changes still arrive via events.
 
 The RX loop shows the application flow: receive a complete frame, decode a
 `sensor_reading`, then call `handle_sensor_reading()`. That handler currently
@@ -99,6 +100,14 @@ RX and two TX. Compared with the 256-entry table and sixteen buffers per data
 pool, these settings save 10176 bytes on the current SAM R21 build. Ethernet and
 HTTP traffic share these finite pools: validate concurrent radio traffic and
 HTTP requests before treating these counts as final.
+
+Further trims: the Ethernet monitor thread is folded into the gateway loop,
+net-mgmt events run on the system workqueue (`CONFIG_NET_MGMT_EVENT_SYSTEM_WORKQUEUE`),
+`ISR_STACK_SIZE=1024`, `MAIN_STACK_SIZE=512` (`main()` returns immediately),
+`NET_IPV4_MAX_ROUTES=2`, `NET_MAX_CONTEXTS=3` (radio socket + DHCP + one HTTP
+listener), `LOG_BUFFER_SIZE=512`. Measured SAM R21: RAM 23460/32768 (71.6%).
+`NET_MAX_CONTEXTS=3` and two routes are floors for the planned HTTP listener;
+raising either re-grows `contexts`/`route_ipv4_entries` linearly.
 
 The planned HTTP API is:
 
