@@ -3,14 +3,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/* PA28 is free again: the Ethernet board is on EXT3, which has no reset line. */
+/* PA28 is the Ethernet reset line on EXT1; keep the button off it. */
+&user_button {
+	status = "disabled";
+};
 
  / {
  	example_sensor: example-sensor {
  		compatible = "zephyr,example-sensor";
  		input-gpios = <&porta 28 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
- 	};
-
+		status = "disabled";
+	};
 	blink_led: blink-led {
 		compatible = "blink-gpio-led";
 		led-gpios = <&porta 19 GPIO_ACTIVE_LOW>;
@@ -18,21 +21,21 @@
 	};
 };
 
-/* Ethernet1 on EXT3: SPI data/clock shared with EXT1, but CS is PA14 and
- * EXT3 has no IRQ or reset lines. The driver polls without an interrupt
- * and relies on power-on reset when reset-gpios is absent. */
+/* Ethernet1 on EXT1: CS PB3, IRQ PA22, reset PA28 (shared with SW0). */
 &sercom5 {
 	status = "okay";
 	compatible = "atmel,sam0-spi";
 	#address-cells = <1>;
 	#size-cells = <0>;
 
-	cs-gpios = <&porta 14 GPIO_ACTIVE_LOW>;
+	cs-gpios = <&portb 3 GPIO_ACTIVE_LOW>;
 
 	eth_ksz8851: ethernet@0 {
 		compatible = "microchip,ksz8851snl";
 		reg = <0>;
 		spi-max-frequency = <1000000>;
+		int-gpios = <&porta 22 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		reset-gpios = <&porta 28 GPIO_ACTIVE_LOW>;
 		local-mac-address = [02 04 A3 12 34 56];
 		status = "okay";
 	};

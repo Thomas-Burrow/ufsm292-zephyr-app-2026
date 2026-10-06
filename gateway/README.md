@@ -70,6 +70,10 @@ uses a 2048-byte stack at priority 5 and waits on `rx_ready` until setup succeed
 HTTP server. The main stack remains available for Zephyr initialization; the
 dedicated gateway thread adds its own stack and thread bookkeeping.
 
+`eth_monitor_id` watches the ENC28J60 Ethernet link: carrier on/off and IPv4
+address events via net-mgmt, plus a 10 s carrier/admin status log. 1024-byte
+stack at priority 7; exits idle if no Ethernet interface exists.
+
 The RX loop shows the application flow: receive a complete frame, decode a
 `sensor_reading`, then call `handle_sensor_reading()`. That handler currently
 updates the memory table and prints the reading, and is the place to add
