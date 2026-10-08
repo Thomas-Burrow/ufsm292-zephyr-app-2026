@@ -128,6 +128,64 @@ struct ksz_debug {
 
 struct ksz_debug ksz_debug;
 
+enum ksz_boot_stage {
+	KSZ_BOOT_BEGIN,
+	KSZ_BOOT_SPI_READY,
+	KSZ_BOOT_IRQ_READY,
+	KSZ_BOOT_IRQ_INPUT,
+	KSZ_BOOT_RESET_READY,
+	KSZ_BOOT_RESET_ASSERT,
+	KSZ_BOOT_RESET_RELEASE,
+	KSZ_BOOT_REG_READ,
+	KSZ_BOOT_REG_WRITE,
+	KSZ_BOOT_END,
+};
+
+struct ksz_boot_record {
+	uint32_t ms;
+	int16_t result;
+	uint8_t stage;
+	uint8_t reg;
+	uint8_t tx[4];
+	uint8_t rx[4];
+};
+
+/* Preserve the first transactions, not a rolling tail. No console dependency.
+ * Only device initialization records here; runtime traffic leaves it intact. */
+struct {
+	struct ksz_boot_record records[128];
+	uint32_t count;
+	uint32_t dropped;
+	int result;
+	bool active;
+	bool complete;
+} ksz_boot_trace;
+
+static void boot_record(enum ksz_boot_stage stage, uint8_t reg, int result,
+			const uint8_t *tx, const uint8_t *rx)
+{
+	if (!ksz_boot_trace.active) {
+		return;
+	}
+	if (ksz_boot_trace.count == ARRAY_SIZE(ksz_boot_trace.records)) {
+		ksz_boot_trace.dropped++;
+		return;
+	}
+	struct ksz_boot_record *record = &ksz_boot_trace.records[ksz_boot_trace.count];
+
+	record->ms = k_uptime_get_32();
+	record->stage = stage;
+	record->reg = reg;
+	record->result = result;
+	if (tx != NULL) {
+		memcpy(record->tx, tx, sizeof(record->tx));
+	}
+	if (rx != NULL) {
+		memcpy(record->rx, rx, sizeof(record->rx));
+	}
+	ksz_boot_trace.count++;
+}
+
 struct ksz_config {
 	struct spi_dt_spec spi;
 	struct gpio_dt_spec irq;
@@ -165,6 +223,8 @@ static int reg_read(const struct device *dev, uint8_t reg, uint16_t *value)
 	struct spi_buf_set rxset = { .buffers = &rxb, .count = 1 };
 	int ret = spi_transceive_dt(&cfg->spi, &txset, &rxset);
 
+	boot_record(KSZ_BOOT_REG_READ, reg, ret, tx, ret == 0 ? rx : NULL);
+
 	if (ret == 0) {
 		*value = sys_get_le16(&rx[2]);
 	}
@@ -181,7 +241,10 @@ static int reg_write(const struct device *dev, uint8_t reg, uint16_t value)
 	struct spi_buf b = { .buf = tx, .len = sizeof(tx) };
 	struct spi_buf_set s = { .buffers = &b, .count = 1 };
 
-	return spi_write_dt(&cfg->spi, &s);
+	int ret = spi_write_dt(&cfg->spi, &s);
+
+	boot_record(KSZ_BOOT_REG_WRITE, reg, ret, tx, NULL);
+	return ret;
 }
 
 static void debug_note(int err)
@@ -786,7 +849,7 @@ static const struct ethernet_api api = {
 	.send = send,
 };
 
-static int init(const struct device *dev)
+static int init_chip(const struct device *dev)
 {
 	const struct ksz_config *cfg = dev->config;
 	struct ksz_data *data = dev->data;
@@ -796,26 +859,37 @@ static int init(const struct device *dev)
 	k_mutex_init(&data->lock);
 	k_mutex_init(&data->tx_lock);
 	k_sem_init(&data->event, 0, 1);
-	if (!spi_is_ready_dt(&cfg->spi)) {
+	bool spi_ready = spi_is_ready_dt(&cfg->spi);
+
+	boot_record(KSZ_BOOT_SPI_READY, 0, spi_ready ? 0 : -ENODEV, NULL, NULL);
+	if (!spi_ready) {
 		return -ENODEV;
 	}
 	bool has_irq = cfg->irq.port != NULL;
 	bool has_reset = cfg->reset.port != NULL;
 
 	if (has_irq) {
-		if (!gpio_is_ready_dt(&cfg->irq)) {
+		bool ready = gpio_is_ready_dt(&cfg->irq);
+
+		boot_record(KSZ_BOOT_IRQ_READY, 0, ready ? 0 : -ENODEV, NULL, NULL);
+		if (!ready) {
 			return -ENODEV;
 		}
 		ret = gpio_pin_configure_dt(&cfg->irq, GPIO_INPUT);
+		boot_record(KSZ_BOOT_IRQ_INPUT, 0, ret, NULL, NULL);
 		if (ret < 0) {
 			return ret;
 		}
 	}
 	if (has_reset) {
-		if (!gpio_is_ready_dt(&cfg->reset)) {
+		bool ready = gpio_is_ready_dt(&cfg->reset);
+
+		boot_record(KSZ_BOOT_RESET_READY, 0, ready ? 0 : -ENODEV, NULL, NULL);
+		if (!ready) {
 			return -ENODEV;
 		}
 		ret = gpio_pin_configure_dt(&cfg->reset, GPIO_OUTPUT_ACTIVE);
+		boot_record(KSZ_BOOT_RESET_ASSERT, 0, ret, NULL, NULL);
 		if (ret < 0) {
 			return ret;
 		}
@@ -823,6 +897,7 @@ static int init(const struct device *dev)
 		/* PA28 is shared with SW0; actively drive reset released instead of
 		 * relying on a pull-up that may not hold the line high. */
 		ret = gpio_pin_configure_dt(&cfg->reset, GPIO_OUTPUT_INACTIVE);
+		boot_record(KSZ_BOOT_RESET_RELEASE, 0, ret, NULL, NULL);
 		if (ret < 0) {
 			return ret;
 		}
@@ -914,6 +989,19 @@ static int init(const struct device *dev)
 		}
 	}
 	return 0;
+}
+
+static int init(const struct device *dev)
+{
+	ksz_boot_trace.active = true;
+	boot_record(KSZ_BOOT_BEGIN, 0, 0, NULL, NULL);
+	int ret = init_chip(dev);
+
+	boot_record(KSZ_BOOT_END, 0, ret, NULL, NULL);
+	ksz_boot_trace.result = ret;
+	ksz_boot_trace.active = false;
+	ksz_boot_trace.complete = true;
+	return ret;
 }
 
 #define KSZ_INST(inst) \

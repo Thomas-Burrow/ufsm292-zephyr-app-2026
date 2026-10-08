@@ -27,6 +27,8 @@
 	compatible = "atmel,sam0-spi";
 	#address-cells = <1>;
 	#size-cells = <0>;
+	/* PAD2 MOSI / PAD3 SCLK: SAM R21 datasheet Table 25-7. */
+	dopo = <1>;
 
 	cs-gpios = <&portb 3 GPIO_ACTIVE_LOW>;
 

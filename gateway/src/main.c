@@ -13,6 +13,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
+#include <zephyr/init.h>
 #include <zephyr/logging/log.h>
 
 #include <zephyr/net/net_if.h>
@@ -70,8 +71,8 @@ static void eth_event_handler(struct net_mgmt_event_callback *cb,
 static struct net_mgmt_event_callback eth_cb;
 static struct net_if *eth_iface;
 
-/* One-shot setup called from gateway_run; carrier/IP changes still arrive via events. */
-static void eth_setup(void)
+/* Run after device/network initialization and before the application threads. */
+static int eth_setup(void)
 {
 	net_mgmt_init_event_callback(&eth_cb, eth_event_handler,
 				     NET_EVENT_ETHERNET_CARRIER_ON |
@@ -81,12 +82,12 @@ static void eth_setup(void)
 	eth_iface = net_if_get_first_by_type(&NET_L2_GET_NAME(ETHERNET));
 	if (eth_iface == NULL) {
 		LOG_WRN("eth: no ethernet interface, monitor idle");
-		return;
+		return -ENODEV;
 	}
 	if (!device_is_ready(net_if_get_device(eth_iface))) {
 		LOG_ERR("eth: controller initialization failed");
 		eth_iface = NULL;
-		return;
+		return -ENODEV;
 	}
 	if (!net_if_is_admin_up(eth_iface)) {
 		int ret = net_if_up(eth_iface);
@@ -94,14 +95,17 @@ static void eth_setup(void)
 		if (ret < 0) {
 			LOG_ERR("eth: net_if_up failed (%d)", ret);
 			eth_iface = NULL;
-			return;
+			return ret;
 		}
 	}
 	net_dhcpv4_start(eth_iface);
 	LOG_INF("eth: monitor up, carrier=%s admin=%s",
 		net_if_is_carrier_ok(eth_iface) ? "ok" : "down",
 		net_if_is_admin_up(eth_iface) ? "up" : "down");
+	return 0;
 }
+
+SYS_INIT(eth_setup, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
 static K_MUTEX_DEFINE(gateway_memory_lock);
 
@@ -175,8 +179,6 @@ static void gateway_run(void *p1, void *p2, void *p3)
 	ARG_UNUSED(p1);
 	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
-
-	eth_setup();
 
 	printk("Gateway %s (samr21_xpro, ch %d, pan 0x%04x, promiscuous)\n",
 	       APP_VERSION_STRING, GW_CHANNEL, GW_PAN_ID);
