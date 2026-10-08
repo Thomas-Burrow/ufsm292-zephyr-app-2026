@@ -57,9 +57,9 @@ LOG_MODULE_REGISTER(eth_ksz8851snl, CONFIG_ETHERNET_LOG_LEVEL);
 #define RXQCR_RXDTTE  BIT(7)
 #define RXQCR_RXDBCTE BIT(6)
 #define RXQCR_RXFCTE  BIT(5)
-#define RXQCR_ADRFE   BIT(4)
-/* ADRFE is backup. Linux always releases with RRXEF; a short read does not auto-dequeue. */
-#define RXQCR_BASE    (RXQCR_ADRFE | RXQCR_RXFCTE | RXQCR_RXDBCTE | RXQCR_RXDTTE)
+/* Release each frame with RRXEF, matching Linux; ADRFE stays clear so this
+ * releases the frame just read rather than the next queued frame. */
+#define RXQCR_BASE    (RXQCR_RXFCTE | RXQCR_RXDBCTE | RXQCR_RXDTTE)
 #define RXQCR_SDA     BIT(3)
 #define RXQCR_RRXEF   BIT(0)
 #define RXFDPR_RXFPAI  BIT(14)
@@ -370,6 +370,7 @@ static int rx_drain(const struct device *dev)
 	int ret = reg_read(dev, KS_RXFCTR, &ctr);
 
 	if (ret < 0) {
+		k_sem_give(&data->event);
 		return ret;
 	}
 	ksz_debug.rxfctr = ctr;
@@ -389,22 +390,28 @@ static int rx_drain(const struct device *dev)
 
 		ret = reg_read(dev, KS_RXFHSR, &stat);
 		if (ret < 0) {
+			k_sem_give(&data->event);
 			return ret;
 		}
 		ret = reg_read(dev, KS_RXFHBCR, &wire_len);
 		if (ret < 0) {
+			k_sem_give(&data->event);
 			return ret;
 		}
 		wire_len &= RXFHBCR_MASK;
 		ksz_debug.rxfhsr = stat;
 		ksz_debug.rxfhbcr = wire_len;
-
+		if ((stat & RXFSHR_RXFV) == 0) {
+			break;
+		}
 		ret = reg_write(dev, KS_RXFDPR, RXFDPR_RXFPAI);
 		if (ret < 0) {
+			k_sem_give(&data->event);
 			return ret;
 		}
 		ret = reg_write(dev, KS_RXQCR, RXQCR_BASE | RXQCR_SDA);
 		if (ret < 0) {
+			k_sem_give(&data->event);
 			return ret;
 		}
 
@@ -453,6 +460,7 @@ static int rx_drain(const struct device *dev)
 			if (pkt != NULL) {
 				net_pkt_unref(pkt);
 			}
+			k_sem_give(&data->event);
 			return ret;
 		}
 		if (pkt != NULL) {
@@ -467,6 +475,7 @@ static int rx_drain(const struct device *dev)
 			}
 			k_mutex_lock(&data->lock, K_FOREVER);
 			if (ret < 0) {
+				k_sem_give(&data->event);
 				return ret;
 			}
 		}
@@ -540,7 +549,7 @@ static void worker(void *a, void *b, void *c)
 		if (ret == 0 && handled != 0) {
 			ret = reg_write(dev, KS_ISR, handled);
 		}
-		if (ret == 0 && (handled & (IRQ_RXI | IRQ_RXOI | IRQ_RXPSI)) != 0) {
+		if (ret == 0) {
 			ret = rx_drain(dev);
 		}
 		if (ret == 0) {
